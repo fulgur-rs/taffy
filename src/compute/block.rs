@@ -1326,22 +1326,49 @@ fn perform_final_layout_on_in_flow_children(
                         };
                         let min_y = committed_y_offset + y_margin_offset;
 
+                        #[cfg(feature = "float_layout")]
+                        let collapses_top =
+                            is_collapsing_with_first_margin_set && own_margins_collapse_with_children.start;
+                        #[cfg(feature = "float_layout")]
+                        let hypothetical_y = if collapses_top {
+                            let margins = active_collapsible_margin_set.collapse_with_margin(item_non_auto_margin.top);
+                            block_ctx
+                                .hypothetical_top_position(margins)
+                                .unwrap_or(committed_y_offset + margins.resolve())
+                        } else {
+                            min_y
+                        };
+                        #[cfg(feature = "float_layout")]
+                        let adjoining_float = collapses_top && block_ctx.has_adjoining_float(Clear::Both);
+                        #[cfg(feature = "float_layout")]
+                        let forced_clearance = collapses_top && block_ctx.has_adjoining_float(item.clear);
+                        #[cfg(feature = "float_layout")]
+                        let search_y = if forced_clearance {
+                            block_ctx.cleared_threshold(item.clear).unwrap_or(hypothetical_y)
+                        } else if adjoining_float {
+                            // An adjoining float moves with this strut if the margins escape.
+                            // Test beside that float before adding the escaping margin.
+                            committed_y_offset
+                        } else {
+                            hypothetical_y
+                        };
+
                         // In addition to the running flag, check the float context directly:
                         // floats placed by the subtree of a preceding in-flow sibling (in the same
                         // BFC) are not reflected in the flag
                         #[cfg(feature = "float_layout")]
-                        if has_active_floats || block_ctx.has_active_floats(min_y) {
+                        if forced_clearance || has_active_floats || block_ctx.has_active_floats(search_y) {
                             let x_margins = [item_non_auto_margin.left, item_non_auto_margin.right];
                             // An auto width resolves to at least the negation of the margin sum
                             // (so that the margin box width is non-negative, per CSS2 §10.3.3)
                             let min_auto_width = -item_non_auto_x_margin_sum;
 
-                            // Find the highest slot (at or below `min_y`) with enough horizontal space
+                            // Find the highest slot at the hypothetical collapsed border position or below
                             // for the item's border box, which must not overlap any float
                             let mut slot_segment = None;
                             let slot = loop {
                                 let slot =
-                                    block_ctx.find_bfc_slot(min_y, x_margins, direction, item.clear, slot_segment);
+                                    block_ctx.find_bfc_slot(search_y, x_margins, direction, item.clear, slot_segment);
                                 let Some(segment_id) = slot.segment_id else { break slot };
                                 let width = item
                                     .size
@@ -1357,14 +1384,15 @@ fn perform_final_layout_on_in_flow_children(
                             // If the item had to move down to avoid floats then it "separates from the
                             // float": similarly to clearance, its top margin no longer collapses with
                             // the parent's margins.
-                            if slot.y > min_y {
-                                item_pushed_below_float = true;
-                            }
+                            item_pushed_below_float = forced_clearance
+                                || slot.y > if adjoining_float { committed_y_offset } else { hypothetical_y };
+                            let border_y =
+                                if collapses_top && !item_pushed_below_float { committed_y_offset } else { slot.y };
 
                             has_active_floats = slot.segment_id.is_some();
                             item_avoids_floats = true;
                             let stretch_width = slot.stretch_width.max(min_auto_width);
-                            break 'block (stretch_width, Point { x: slot.x, y: slot.y }, slot.border_width);
+                            break 'block (stretch_width, Point { x: slot.x, y: border_y }, slot.border_width);
                         }
 
                         if !has_active_floats {

@@ -107,58 +107,154 @@ fn changing_a_context_laid_out_child_invalidates_its_cached_parent() {
 #[cfg(feature = "taffy_tree")]
 fn clearance_stays_finite_across_signed_ancestor_margin_sets() {
     use crate::prelude::*;
-    for float_height in [10.0, 90.0] {
-        for parent_top in [-100.0, -80.0, -20.0, 0.0, 20.0, 80.0, 100.0] {
-            for child_top in [-100.0, -80.0, -20.0, 0.0, 20.0, 80.0, 100.0] {
-                for parent_clear in [Clear::None, Clear::Left] {
-                    let mut tree: TaffyTree<()> = TaffyTree::new();
-                    tree.disable_rounding();
-                    let float = tree
-                        .new_leaf(Style {
-                            display: Display::Block,
-                            float: Float::Left,
-                            size: Size { width: length(40.0), height: length(float_height) },
-                            ..Default::default()
-                        })
-                        .unwrap();
-                    let child = tree
-                        .new_leaf(Style {
-                            display: Display::Block,
-                            clear: Clear::Left,
-                            margin: Rect { top: length(child_top), ..zero() },
-                            size: Size { width: auto(), height: length(10.0) },
-                            ..Default::default()
-                        })
-                        .unwrap();
-                    let parent = tree
-                        .new_with_children(
-                            Style {
+    for child_overflow in [Overflow::Visible, Overflow::Hidden] {
+        for float_height in [10.0, 90.0] {
+            for parent_top in [-100.0, -80.0, -20.0, 0.0, 20.0, 80.0, 100.0] {
+                for child_top in [-100.0, -80.0, -20.0, 0.0, 20.0, 80.0, 100.0] {
+                    for parent_clear in [Clear::None, Clear::Left] {
+                        let mut tree: TaffyTree<()> = TaffyTree::new();
+                        tree.disable_rounding();
+                        let float = tree
+                            .new_leaf(Style {
                                 display: Display::Block,
-                                clear: parent_clear,
-                                margin: Rect { top: length(parent_top), ..zero() },
+                                float: Float::Left,
+                                size: Size { width: length(40.0), height: length(float_height) },
                                 ..Default::default()
-                            },
-                            &[child],
-                        )
-                        .unwrap();
-                    let root = tree
-                        .new_with_children(
-                            Style {
+                            })
+                            .unwrap();
+                        let child = tree
+                            .new_leaf(Style {
                                 display: Display::Block,
-                                size: Size { width: length(200.0), height: auto() },
+                                clear: Clear::Left,
+                                overflow: Point { x: child_overflow, y: child_overflow },
+                                margin: Rect { top: length(child_top), ..zero() },
+                                size: Size { width: auto(), height: length(10.0) },
                                 ..Default::default()
-                            },
-                            &[float, parent],
-                        )
-                        .unwrap();
-                    tree.compute_layout(root, Size::MAX_CONTENT).unwrap();
-                    let parent_layout = tree.layout(parent).unwrap();
-                    let child_layout = tree.layout(child).unwrap();
-                    let child_top = parent_layout.location.y + child_layout.location.y;
-                    assert!(child_top.is_finite());
-                    assert!(child_top >= float_height);
+                            })
+                            .unwrap();
+                        let parent = tree
+                            .new_with_children(
+                                Style {
+                                    display: Display::Block,
+                                    clear: parent_clear,
+                                    margin: Rect { top: length(parent_top), ..zero() },
+                                    ..Default::default()
+                                },
+                                &[child],
+                            )
+                            .unwrap();
+                        let root = tree
+                            .new_with_children(
+                                Style {
+                                    display: Display::Block,
+                                    size: Size { width: length(200.0), height: auto() },
+                                    ..Default::default()
+                                },
+                                &[float, parent],
+                            )
+                            .unwrap();
+                        tree.compute_layout(root, Size::MAX_CONTENT).unwrap();
+                        let parent_layout = tree.layout(parent).unwrap();
+                        let child_layout = tree.layout(child).unwrap();
+                        let child_top = parent_layout.location.y + child_layout.location.y;
+                        assert!(child_top.is_finite());
+                        assert!(child_top >= float_height);
+                    }
                 }
             }
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "taffy_tree")]
+fn formatting_context_clearance_with_a_negative_leading_margin_does_not_cycle() {
+    use crate::prelude::*;
+    let mut tree: TaffyTree<()> = TaffyTree::new();
+    tree.disable_rounding();
+    let float = tree
+        .new_leaf(Style {
+            display: Display::Block,
+            float: Float::Left,
+            size: Size { width: length(40.0), height: length(90.0) },
+            ..Default::default()
+        })
+        .unwrap();
+    let child = tree
+        .new_leaf(Style {
+            display: Display::Block,
+            clear: Clear::Left,
+            overflow: Point { x: Overflow::Hidden, y: Overflow::Hidden },
+            margin: Rect { top: length(-80.0), ..zero() },
+            size: Size { width: auto(), height: length(10.0) },
+            ..Default::default()
+        })
+        .unwrap();
+    let parent = tree
+        .new_with_children(
+            Style { display: Display::Block, margin: Rect { top: length(100.0), ..zero() }, ..Default::default() },
+            &[child],
+        )
+        .unwrap();
+    let root = tree
+        .new_with_children(
+            Style {
+                display: Display::Block,
+                size: Size { width: length(200.0), height: auto() },
+                ..Default::default()
+            },
+            &[float, parent],
+        )
+        .unwrap();
+    tree.compute_layout(root, Size::MAX_CONTENT).unwrap();
+    assert_eq!(tree.layout(parent).unwrap().location.y, 100.0);
+    assert_eq!(tree.layout(child).unwrap().location.y, -10.0);
+}
+
+#[test]
+#[cfg(feature = "taffy_tree")]
+fn formatting_context_float_avoidance_uses_the_collapsed_border_position() {
+    use crate::prelude::*;
+    for float_height in [10.0, 100.0] {
+        for child_width in [100.0, 200.0] {
+            let mut tree: TaffyTree<()> = TaffyTree::new();
+            tree.disable_rounding();
+            let float = tree
+                .new_leaf(Style {
+                    display: Display::Block,
+                    float: Float::Left,
+                    size: Size { width: length(40.0), height: length(float_height) },
+                    ..Default::default()
+                })
+                .unwrap();
+            let child = tree
+                .new_leaf(Style {
+                    display: Display::FlowRoot,
+                    margin: Rect { top: length(20.0), ..zero() },
+                    size: Size { width: length(child_width), height: length(10.0) },
+                    ..Default::default()
+                })
+                .unwrap();
+            let parent =
+                tree.new_with_children(Style { display: Display::Block, ..Default::default() }, &[child]).unwrap();
+            let root = tree
+                .new_with_children(
+                    Style {
+                        display: Display::Block,
+                        size: Size { width: length(200.0), height: auto() },
+                        ..Default::default()
+                    },
+                    &[float, parent],
+                )
+                .unwrap();
+            tree.compute_layout(root, Size::MAX_CONTENT).unwrap();
+            let pushed = child_width == 200.0 && float_height == 100.0;
+            let parent_layout = tree.layout(parent).unwrap();
+            let child_layout = tree.layout(child).unwrap();
+            assert_eq!(parent_layout.location.y, if pushed { 0.0 } else { 20.0 });
+            assert_eq!(parent_layout.size.height, if pushed { 110.0 } else { 10.0 });
+            assert_eq!(child_layout.location.y, if pushed { 100.0 } else { 0.0 });
+            assert_eq!(child_layout.location.x, if float_height == 100.0 && !pushed { 40.0 } else { 0.0 });
         }
     }
 }
