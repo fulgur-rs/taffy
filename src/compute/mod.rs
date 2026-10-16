@@ -39,7 +39,7 @@ pub(crate) mod grid;
 pub use leaf::compute_leaf_layout;
 
 #[cfg(feature = "block_layout")]
-pub use self::block::{compute_block_layout, BlockContext, BlockFormattingContext};
+pub use self::block::{compute_block_layout, BlockContext, BlockContextSnapshot, BlockFormattingContext};
 
 #[cfg(feature = "flexbox")]
 pub use self::flexbox::compute_flexbox_layout;

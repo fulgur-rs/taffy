@@ -294,12 +294,17 @@ where
             return compute_hidden_layout(self, node_id);
         }
 
+        #[cfg(feature = "block_layout")]
+        let uncached = block_ctx.is_some();
+        #[cfg(not(feature = "block_layout"))]
+        let uncached = false;
+
         // We run the following wrapped in "compute_cached_layout", which will check the cache for an entry matching the node and inputs and:
         //   - Return that entry if exists
         //   - Else call the passed closure (below) to compute the result
         //
         // If there was no cache match and a new result needs to be computed then that result will be added to the cache
-        compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
+        let compute = |tree: &mut Self, node_id: NodeId, inputs: LayoutInput| {
             let display_mode = tree.taffy.nodes[node_id.into()].style.display;
             let has_children = tree.child_count(node_id) > 0;
 
@@ -325,7 +330,13 @@ where
                     (tree.measure_function)(inputs, node_id, node_context, style)
                 }
             }
-        })
+        };
+        // The cache contains sizes, not shared float placements or ancestor strut state.
+        if uncached {
+            compute(self, node_id, inputs)
+        } else {
+            compute_cached_layout(self, node_id, inputs, compute)
+        }
     }
 }
 

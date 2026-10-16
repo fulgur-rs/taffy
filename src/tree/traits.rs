@@ -303,6 +303,10 @@ pub trait LayoutBlockContainer: LayoutPartialTree {
 
     /// Compute the specified node's size or full layout given the specified constraints
     #[cfg(feature = "block_layout")]
+    ///
+    /// A supplied block context owns mutable float and strut state. A size-only cache hit
+    /// cannot replace this call: speculative layouts may be retried at a new origin after
+    /// restoring that state. Recompute the child whenever a context is supplied.
     fn compute_block_child_layout(
         &mut self,
         node_id: NodeId,
