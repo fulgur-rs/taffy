@@ -110,6 +110,9 @@ struct NodeData {
     /// The cached results of the layout computation
     pub(crate) cache: Cache,
 
+    /// Whether layout must be recomputed, independently of size-cache eligibility.
+    pub(crate) is_dirty: bool,
+
     /// The computation result from layout algorithm
     #[cfg(feature = "detailed_layout_info")]
     pub(crate) detailed_layout_info: DetailedLayoutInfo,
@@ -122,6 +125,7 @@ impl NodeData {
         Self {
             style,
             cache: Cache::new(),
+            is_dirty: true,
             unrounded_layout: Layout::new(),
             final_layout: Layout::new(),
             has_context: false,
@@ -136,7 +140,12 @@ impl NodeData {
     /// If the node was already marked as dirty, returns true
     #[inline]
     pub fn mark_dirty(&mut self) -> ClearState {
-        self.cache.clear()
+        self.cache.clear();
+        if core::mem::replace(&mut self.is_dirty, true) {
+            ClearState::AlreadyEmpty
+        } else {
+            ClearState::Cleared
+        }
     }
 }
 
@@ -215,11 +224,15 @@ impl<NodeContext> CacheTree for TaffyTree<NodeContext> {
     }
 
     fn cache_store(&mut self, node_id: NodeId, input: &LayoutInput, layout_output: LayoutOutput) {
-        self.nodes[node_id.into()].cache.store(input, layout_output)
+        let node = &mut self.nodes[node_id.into()];
+        node.cache.store(input, layout_output);
+        node.is_dirty = false;
     }
 
     fn cache_clear(&mut self, node_id: NodeId) {
-        self.nodes[node_id.into()].cache.clear();
+        let node = &mut self.nodes[node_id.into()];
+        node.cache.clear();
+        node.is_dirty = true;
     }
 }
 
@@ -333,7 +346,10 @@ where
         };
         // The cache contains sizes, not shared float placements or ancestor strut state.
         if uncached {
-            compute(self, node_id, inputs)
+            self.taffy.nodes[node_id.into()].cache.clear();
+            let output = compute(self, node_id, inputs);
+            self.taffy.nodes[node_id.into()].is_dirty = false;
+            output
         } else {
             compute_cached_layout(self, node_id, inputs, compute)
         }
@@ -419,11 +435,15 @@ where
     }
 
     fn cache_store(&mut self, node_id: NodeId, input: &LayoutInput, layout_output: LayoutOutput) {
-        self.taffy.nodes[node_id.into()].cache.store(input, layout_output)
+        let node = &mut self.taffy.nodes[node_id.into()];
+        node.cache.store(input, layout_output);
+        node.is_dirty = false;
     }
 
     fn cache_clear(&mut self, node_id: NodeId) {
-        self.taffy.nodes[node_id.into()].cache.clear();
+        let node = &mut self.taffy.nodes[node_id.into()];
+        node.cache.clear();
+        node.is_dirty = true;
     }
 }
 
@@ -901,7 +921,7 @@ impl<NodeContext> TaffyTree<NodeContext> {
     /// Indicates whether the layout of this node needs to be recomputed
     #[inline]
     pub fn dirty(&self, node: NodeId) -> TaffyResult<bool> {
-        Ok(self.nodes[node.into()].cache.is_empty())
+        Ok(self.nodes[node.into()].is_dirty)
     }
 
     /// Updates the stored layout of the provided `node` and its children

@@ -19,18 +19,39 @@ use super::float::{BfcSlot, ContentSlot, FloatContext, FloatIntrinsicWidthCalcul
 #[cfg(feature = "float_layout")]
 use crate::{Clear, Float, FloatDirection};
 
+#[cfg(all(feature = "float_layout", feature = "alloc", not(feature = "std"), target_has_atomic = "ptr"))]
+use alloc::sync::Arc;
+#[cfg(all(feature = "float_layout", feature = "std", target_has_atomic = "ptr"))]
+use std::sync::Arc;
+
+/// Shared storage makes a speculative snapshot constant-time until a float is mutated.
+#[cfg(all(feature = "float_layout", any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+type SavedFloatContext = Arc<FloatContext>;
+/// Heapless and non-atomic targets retain bounded, directly owned storage.
+#[cfg(all(feature = "float_layout", not(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))))]
+type SavedFloatContext = FloatContext;
+
+/// A leading margin strut anchored before the margins shared with ancestors.
+#[derive(Clone, Copy)]
+struct MarginStrut {
+    /// Absolute BFC position before any of these margins are applied.
+    anchor: f32,
+    /// Full signed set contributed by ancestors and the block's own margin.
+    margins: CollapsibleMarginSet,
+}
+
 /// Context for positioning Block and Float boxes within a Block Formatting Context
 pub struct BlockFormattingContext {
     /// The float positioning context that handles positioning floats within this Block Formatting Context
     #[cfg(feature = "float_layout")]
-    float_context: FloatContext,
+    float_context: SavedFloatContext,
 }
 
 impl Default for BlockFormattingContext {
     fn default() -> Self {
         Self {
             #[cfg(feature = "float_layout")]
-            float_context: FloatContext::new(),
+            float_context: FloatContext::new().into(),
         }
     }
 }
@@ -39,6 +60,19 @@ impl BlockFormattingContext {
     /// Create a new `BlockFormattingContext` with the specified width constraint
     pub fn new() -> Self {
         Default::default()
+    }
+
+    /// Mutate shared float storage, copying only when a saved speculative state needs it.
+    #[cfg(feature = "float_layout")]
+    fn float_context_mut(&mut self) -> &mut FloatContext {
+        #[cfg(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr"))]
+        {
+            Arc::make_mut(&mut self.float_context)
+        }
+        #[cfg(not(all(any(feature = "std", feature = "alloc"), target_has_atomic = "ptr")))]
+        {
+            &mut self.float_context
+        }
     }
 
     /// Create an initial `BlockContext` for this `BlockFormattingContext`
@@ -51,6 +85,7 @@ impl BlockFormattingContext {
             float_content_contribution: f32::NEG_INFINITY,
             is_root: true,
             origin_resolved: false,
+            top_margin_strut: None,
             #[cfg(feature = "float_layout")]
             adjoining_floats: [false, false],
             #[cfg(feature = "float_layout")]
@@ -64,7 +99,7 @@ impl BlockFormattingContext {
 pub struct BlockContextSnapshot {
     /// Shared float placements, slots, clearance limits, and source-order state.
     #[cfg(feature = "float_layout")]
-    float_context: FloatContext,
+    float_context: SavedFloatContext,
     /// Height contributed by floats before the speculative child.
     float_content_contribution: f32,
     /// Content edges used by the parent's own float placements.
@@ -95,6 +130,8 @@ pub struct BlockContext<'bfc> {
     is_root: bool,
     /// Whether ancestor top margins have been resolved into this block's normal-flow origin.
     origin_resolved: bool,
+    /// Ancestor margins needed to evaluate clearance as if clear were none.
+    top_margin_strut: Option<MarginStrut>,
     /// Whether a float has been placed (on each side) whose position adjoins the current
     /// margin-collapse strut of this block (i.e. whose final position can still be moved by
     /// margins that collapse into that strut). Such floats force clearance on cleared elements
@@ -120,6 +157,7 @@ impl BlockContext<'_> {
             float_content_contribution: f32::NEG_INFINITY,
             is_root: false,
             origin_resolved: false,
+            top_margin_strut: None,
             // Floats adjoining the parent's current strut also adjoin this block's top strut
             // (if this block's top margin collapses with its first child's, which is checked separately)
             #[cfg(feature = "float_layout")]
@@ -127,6 +165,36 @@ impl BlockContext<'_> {
             #[cfg(feature = "float_layout")]
             top_adjoining_floats: None,
         }
+    }
+
+    /// Create a child context retaining the full ancestor margin strut.
+    ///
+    /// `anchor` is relative to this context before `margins` are applied. If the child's
+    /// margins join this block's leading strut, extend that strut instead. Keep it separate
+    /// from `y_offset`: clearance is tested at the hypothetical position with clear disabled,
+    /// which can differ from the candidate origin after clearance prevents collapsing.
+    pub fn sub_context_for_collapsing_child(
+        &mut self,
+        y_offset: f32,
+        insets: [f32; 2],
+        anchor: f32,
+        margins: CollapsibleMarginSet,
+        joins_top_strut: bool,
+    ) -> BlockContext<'_> {
+        let inherited = joins_top_strut.then_some(self.top_margin_strut).flatten();
+        let strut = match inherited {
+            Some(strut) => MarginStrut { anchor: strut.anchor, margins: strut.margins.collapse_with_set(margins) },
+            None => MarginStrut { anchor: self.y_offset + anchor, margins },
+        };
+        let mut child = self.sub_context(y_offset, insets);
+        child.top_margin_strut = Some(strut);
+        child
+    }
+
+    /// Hypothetical leading border position, relative to this candidate normal-flow origin.
+    pub fn hypothetical_top_position(&self, margins: CollapsibleMarginSet) -> Option<f32> {
+        self.top_margin_strut
+            .map(|strut| strut.anchor + strut.margins.collapse_with_set(margins).resolve() - self.y_offset)
     }
 
     /// Save all float state a speculative child can change.
@@ -179,7 +247,7 @@ impl BlockContext<'_> {
     /// Sub-blocks within a Block Formatting Context should use the `Self::sub_context` method to create
     /// a sub-`BlockContext` with `insets` instead.
     pub fn set_width(&mut self, available_width: f32) {
-        self.bfc.float_context.set_width(available_width);
+        self.bfc.float_context_mut().set_width(available_width);
     }
 
     /// Set the x-axis content-box insets of the `BlockContext`. These are the difference between the border-box
@@ -213,7 +281,7 @@ impl BlockContext<'_> {
         if adjoins_unresolved_strut {
             self.adjoining_floats[direction as usize] = true;
         }
-        let mut pos = self.bfc.float_context.place_floated_box(
+        let mut pos = self.bfc.float_context_mut().place_floated_box(
             floated_box,
             min_y + self.y_offset,
             self.content_box_insets,
@@ -1400,7 +1468,13 @@ fn perform_final_layout_on_in_flow_children(
                     {
                         child_origin_used = origin;
                     }
-                    let mut child_block_ctx = block_ctx.sub_context(origin, insets);
+                    let mut child_block_ctx = block_ctx.sub_context_for_collapsing_child(
+                        origin,
+                        insets,
+                        committed_y_offset,
+                        active_collapsible_margin_set.collapse_with_margin(item_non_auto_margin.top),
+                        is_collapsing_with_first_margin_set && own_margins_collapse_with_children.start,
+                    );
                     child_block_ctx.origin_resolved = final_attempt;
                     let output = tree.compute_block_child_layout(item.node_id, inputs, Some(&mut child_block_ctx));
 
@@ -1482,7 +1556,11 @@ fn perform_final_layout_on_in_flow_children(
                             && is_collapsing_with_first_margin_set
                             && own_margins_collapse_with_children.start
                         {
-                            committed_y_offset
+                            block_ctx
+                                .hypothetical_top_position(
+                                    active_collapsible_margin_set.collapse_with_set(top_margin_set),
+                                )
+                                .unwrap_or(committed_y_offset)
                         } else {
                             committed_y_offset
                                 + active_collapsible_margin_set.collapse_with_set(top_margin_set).resolve()
